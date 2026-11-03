@@ -195,6 +195,22 @@ public class LiarMindServer extends JFrame {
         AppendText("현재 참가자(" + count + "명): " + list);
     }
 
+    // /draw 뒤의 값 검사: 정수 6개(x1 y1 x2 y2 색RGB 굵기)이고 굵기가 1~50이면 true
+    // 잘못된 메시지를 그대로 전달하면 받는 클라이언트들이 숫자 변환 중 오류가 나므로 서버에서 먼저 걸러낸다
+    public static final int MAX_STROKE_WIDTH = 50;
+
+    private boolean isValidDraw(String body) {
+        String[] v = body.trim().split(" ");
+        if (v.length != 6) return false;
+        try {
+            for (String s : v) Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return false;
+        }
+        int width = Integer.parseInt(v[5]);
+        return width >= 1 && width <= MAX_STROKE_WIDTH;
+    }
+
     // 닉네임 검사. 문제가 없으면 null, 문제가 있으면 /reject 뒤에 붙일 이유를 돌려준다
     // 접속 인원 확인과 목록 추가를 한 번에 해야 하므로 UserVec으로 동기화
     private String tryLogin(UserService user, String name) {
@@ -313,23 +329,39 @@ public class LiarMindServer extends JFrame {
                 }
                 while (!closed) {
                     String msg = dis.readUTF().trim();
-                    AppendText(UserName + " > " + msg); // server 화면에 출력
 
                     // "/명령어 나머지" 로 나눈다. 나머지 안에는 공백이 있어도 됨 (채팅 내용 등)
                     String[] parts = msg.split(" ", 2);
                     String cmd = parts[0];
                     String body = parts.length > 1 ? parts[1] : "";
 
+                    // /draw는 마우스를 움직일 때마다 1초에 수십 개씩 오므로 서버 화면에 찍지 않는다
+                    // (전부 찍으면 로그 창이 금방 수만 줄이 되어 서버 화면이 느려짐)
+                    if (!cmd.equals("/draw")) AppendText(UserName + " > " + msg);
+
                     switch (cmd) {
                         case "/chat": // 채팅: 보낸 사람 이름을 붙여서 모두에게
                             if (!body.isEmpty()) WriteAll("/chat " + UserName + " " + body);
+                            break;
+
+                        case "/draw": // 선분 하나: "/draw x1 y1 x2 y2 색RGB 굵기"
+                            // 형식이 맞는 것만 모두에게 그대로 전달 (보낸 사람 포함: 모든 화면의 그림이 항상 같게)
+                            // 3주차: 현재 차례인 사람이 보낸 것만 전달하도록 검사 추가
+                            if (isValidDraw(body)) {
+                                WriteAll("/draw " + body.trim());
+                            } else {
+                                AppendText(UserName + " > 잘못된 /draw 무시: " + body);
+                            }
+                            break;
+
+                        case "/clear": // 그림판 전체 지우기
+                            WriteAll("/clear");
                             break;
 
                         case "/exit": // 종료 명령
                             logout();
                             return;
 
-                        // 2주차: /draw, /clear
                         // 3주차: /start, /next, /vote, /guess
                         default:
                             WriteOne("/system 알 수 없는 명령어입니다: " + cmd);
