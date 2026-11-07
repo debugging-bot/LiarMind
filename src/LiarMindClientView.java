@@ -6,9 +6,10 @@
 //                       /login 후 /loginok·/reject 처리, /users로 프로필 칸 채우기와 방장 표시,
 //                       채팅을 "/chat 내용" 형식으로 변경, /chat·/system 표시, 명령어 switch 처리,
 //                       화면 변경은 EDT에 맡김(SwingUtilities.invokeLater), 나가기(/exit)와 서버 연결 끊김 처리
+//  - 2주차에 추가한 점: 그림판 자리를 DrawPanel로 교체, 색상 5개·굵기 3단계·지우개·전체 지우기 버튼,
+//                       /draw·/clear 받아서 그리기, 숫자가 아닌 /draw는 무시
 //  - WindowBuilder: 화면 배치는 모두 생성자 안에 setBounds로 작성해서 Design 탭에서 보이고 수정할 수 있다
 
-import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
 import java.awt.event.ActionEvent;
@@ -44,8 +45,19 @@ public class LiarMindClientView extends JFrame {
     private JPanel contentPane;
     private JLabel lblStatus;       // 위쪽 상태 표시 (대기 중, 3주차: 누구 차례인지)
     private JLabel lblWord;         // 제시어 표시 (3주차)
-    private JPanel drawArea;        // 그림판 자리 (2주차에 DrawPanel로 교체)
-    private JPanel colorPanel;      // 색상·굵기 버튼 자리 (2주차)
+    private DrawPanel drawPanel;    // 그림판 (2주차)
+    private JPanel colorPanel;      // 색상·굵기 버튼 묶음 (2주차)
+    private JButton btnBlack;
+    private JButton btnRed;
+    private JButton btnBlue;
+    private JButton btnGreen;
+    private JButton btnYellow;
+    private JButton btnEraser;
+    private JButton btnClear;
+    private JButton btnThin;
+    private JButton btnMedium;
+    private JButton btnThick;
+    private JLabel lblTool;         // 지금 고른 도구 표시
     private JTextArea textArea;     // 채팅 출력창 (4주차에 이모티콘용 JTextPane으로 교체)
     private JTextField txtInput;
     private JButton btnSend;
@@ -110,18 +122,17 @@ public class LiarMindClientView extends JFrame {
         lblWord.setBounds(260, 40, 560, 34);
         contentPane.add(lblWord);
 
-        // ── 가운데: 그림판 자리 (560×420) ──
-        drawArea = new JPanel();
-        drawArea.setBackground(Color.WHITE);
-        drawArea.setBorder(new LineBorder(Color.GRAY, 1));
-        drawArea.setBounds(260, 82, 560, 420);
-        contentPane.add(drawArea);
-        drawArea.setLayout(new BorderLayout(0, 0));
+        // ── 가운데: 그림판 (560×420) ──
+        // 테두리는 그림판 바깥에 따로 그린다 (그림판 안에 테두리를 넣으면 그림 좌표가 테두리 두께만큼 밀림)
+        JPanel drawFrame = new JPanel();
+        drawFrame.setBorder(new LineBorder(Color.GRAY, 1));
+        drawFrame.setBounds(259, 81, 562, 422);
+        drawFrame.setLayout(null);
+        contentPane.add(drawFrame);
 
-        JLabel lblDrawHint = new JLabel("그림판 (2주차에 DrawPanel로 교체)");
-        lblDrawHint.setHorizontalAlignment(SwingConstants.CENTER);
-        lblDrawHint.setForeground(Color.LIGHT_GRAY);
-        drawArea.add(lblDrawHint, BorderLayout.CENTER);
+        drawPanel = new DrawPanel();
+        drawPanel.setBounds(1, 1, 560, 420);
+        drawFrame.add(drawPanel);
 
         // ── 왼쪽: 프로필 칸 0~3 ──
         slot0 = new ProfilePanel();
@@ -180,9 +191,72 @@ public class LiarMindClientView extends JFrame {
 
         // ── 아래 오른쪽: 색상 버튼 자리, 시작·다음·나가기 ──
         colorPanel = new JPanel();
-        colorPanel.setBorder(new TitledBorder(null, "색상 · 굵기 (2주차)", TitledBorder.LEADING, TitledBorder.TOP, null, null));
+        colorPanel.setBorder(new TitledBorder(null, "펜", TitledBorder.LEADING, TitledBorder.TOP, null, null));
         colorPanel.setBounds(640, 520, 420, 76);
         contentPane.add(colorPanel);
+        colorPanel.setLayout(null);
+
+        // 1줄: 색상 5개, 지우개, 전체 지우기
+        btnBlack = new JButton("");
+        btnBlack.setToolTipText("검정");
+        btnBlack.setBackground(Color.BLACK);
+        btnBlack.setBounds(12, 18, 30, 24);
+        colorPanel.add(btnBlack);
+
+        btnRed = new JButton("");
+        btnRed.setToolTipText("빨강");
+        btnRed.setBackground(Color.RED);
+        btnRed.setBounds(48, 18, 30, 24);
+        colorPanel.add(btnRed);
+
+        btnBlue = new JButton("");
+        btnBlue.setToolTipText("파랑");
+        btnBlue.setBackground(Color.BLUE);
+        btnBlue.setBounds(84, 18, 30, 24);
+        colorPanel.add(btnBlue);
+
+        btnGreen = new JButton("");
+        btnGreen.setToolTipText("초록");
+        btnGreen.setBackground(new Color(0, 160, 0));
+        btnGreen.setBounds(120, 18, 30, 24);
+        colorPanel.add(btnGreen);
+
+        btnYellow = new JButton("");
+        btnYellow.setToolTipText("노랑");
+        btnYellow.setBackground(new Color(255, 210, 0));
+        btnYellow.setBounds(156, 18, 30, 24);
+        colorPanel.add(btnYellow);
+
+        btnEraser = new JButton("지우개");
+        btnEraser.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
+        btnEraser.setBounds(200, 18, 80, 24);
+        colorPanel.add(btnEraser);
+
+        btnClear = new JButton("전체 지우기");
+        btnClear.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
+        btnClear.setBounds(286, 18, 120, 24);
+        colorPanel.add(btnClear);
+
+        // 2줄: 굵기 3단계, 지금 도구 표시
+        btnThin = new JButton("가늘게");
+        btnThin.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
+        btnThin.setBounds(12, 46, 74, 24);
+        colorPanel.add(btnThin);
+
+        btnMedium = new JButton("보통");
+        btnMedium.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
+        btnMedium.setBounds(92, 46, 74, 24);
+        colorPanel.add(btnMedium);
+
+        btnThick = new JButton("굵게");
+        btnThick.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
+        btnThick.setBounds(172, 46, 74, 24);
+        colorPanel.add(btnThick);
+
+        lblTool = new JLabel("현재: 검정 · 굵기 3");
+        lblTool.setFont(new Font("맑은 고딕", Font.BOLD, 12));
+        lblTool.setBounds(258, 46, 150, 24);
+        colorPanel.add(lblTool);
 
         btnStart = new JButton("게임 시작");
         btnStart.setFont(new Font("맑은 고딕", Font.BOLD, 15));
@@ -203,6 +277,21 @@ public class LiarMindClientView extends JFrame {
         slots = new ProfilePanel[] { slot0, slot1, slot2, slot3, slot4, slot5, slot6, slot7 };
         btnStart.setVisible(false); // 방장에게만 보임 (/users 받을 때 결정)
         btnNext.setEnabled(false);  // 3주차: 내 차례일 때만 켜짐
+
+        drawPanel.setView(this);    // 그림판이 서버로 /draw를 보낼 수 있게 연결
+
+        ToolAction tool = new ToolAction();
+        JButton[] toolButtons = { btnBlack, btnRed, btnBlue, btnGreen, btnYellow,
+                                  btnEraser, btnClear, btnThin, btnMedium, btnThick };
+        for (JButton b : toolButtons) {
+            b.setFocusPainted(false);
+            b.addActionListener(tool);
+        }
+        JButton[] colorButtons = { btnBlack, btnRed, btnBlue, btnGreen, btnYellow };
+        for (JButton b : colorButtons) {
+            b.setOpaque(true);                          // 운영체제 테마에서도 배경색이 보이게
+            b.setBorder(new LineBorder(Color.GRAY, 1));
+        }
 
         Myaction action = new Myaction();
         btnSend.addActionListener(action);
@@ -298,6 +387,7 @@ public class LiarMindClientView extends JFrame {
                 setVisible(true);
                 mainFrame.setVisible(false);
                 AppendText("[알림] " + UserName + "(으)로 접속했습니다.");
+                drawPanel.setCanDraw(true); // 2주차: 접속하면 누구나 그릴 수 있음 (3주차: /turn으로 내 차례일 때만)
                 txtInput.requestFocus();
                 break;
 
@@ -324,12 +414,65 @@ public class LiarMindClientView extends JFrame {
                 break;
             }
 
-            // 2주차: /draw, /clear
+            case "/draw": // "/draw x1 y1 x2 y2 색RGB 굵기" → 그림판에 선분 하나
+                handleDraw(body);
+                break;
+
+            case "/clear": // 그림판 전체 지우기
+                drawPanel.clearCanvas();
+                break;
+
             // 3주차: /word, /turn, /votestart, /guessstart, /result
             default:
                 AppendText("(처리하지 않은 메시지) " + msg);
                 break;
         }
+    }
+
+    // "/draw" 뒤의 값 6개를 숫자로 바꿔서 그린다
+    // 개수가 다르거나 숫자가 아니면 무시한다 (잘못된 메시지 하나 때문에 수신 처리가 멈추지 않게)
+    private void handleDraw(String body) {
+        String[] v = body.trim().split(" ");
+        if (v.length != 6) return;
+        try {
+            int x1 = Integer.parseInt(v[0]);
+            int y1 = Integer.parseInt(v[1]);
+            int x2 = Integer.parseInt(v[2]);
+            int y2 = Integer.parseInt(v[3]);
+            int rgb = Integer.parseInt(v[4]);
+            int w = Integer.parseInt(v[5]);
+            if (w < 1 || w > 50) return; // 말도 안 되는 굵기도 무시
+            drawPanel.drawLine(x1, y1, x2, y2, rgb, w);
+        } catch (NumberFormatException e) {
+            // 숫자가 아닌 값이 섞인 메시지는 그리지 않는다
+        }
+    }
+
+    // 펜 버튼: 색상, 지우개, 굵기는 내 그림판 설정만 바꾸고, 전체 지우기만 서버로 보낸다
+    class ToolAction implements ActionListener {
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            Object src = e.getSource();
+            if (src == btnBlack)       { drawPanel.setPenColor(Color.BLACK); colorName = "검정"; }
+            else if (src == btnRed)    { drawPanel.setPenColor(Color.RED); colorName = "빨강"; }
+            else if (src == btnBlue)   { drawPanel.setPenColor(Color.BLUE); colorName = "파랑"; }
+            else if (src == btnGreen)  { drawPanel.setPenColor(btnGreen.getBackground()); colorName = "초록"; }
+            else if (src == btnYellow) { drawPanel.setPenColor(btnYellow.getBackground()); colorName = "노랑"; }
+            else if (src == btnEraser) { drawPanel.setEraser(true); }
+            else if (src == btnThin)   { drawPanel.setPenWidth(3); penWidth = 3; }
+            else if (src == btnMedium) { drawPanel.setPenWidth(6); penWidth = 6; }
+            else if (src == btnThick)  { drawPanel.setPenWidth(12); penWidth = 12; }
+            else if (src == btnClear)  { SendMessage("/clear"); } // 내 화면도 서버가 돌려준 /clear로 지워진다
+            updateToolLabel();
+        }
+    }
+
+    private String colorName = "검정";
+    private int penWidth = 3;
+
+    private void updateToolLabel() {
+        if (drawPanel.isEraser()) lblTool.setText("현재: 지우개");
+        else lblTool.setText("현재: " + colorName + " · 굵기 " + penWidth);
     }
 
     // "/users 민지,철수,영희" → 앞에서부터 프로필 칸 채우기, 첫 번째가 방장
@@ -373,6 +516,7 @@ public class LiarMindClientView extends JFrame {
         }
         AppendText("[알림] 서버 연결이 끊겼습니다.");
         lblStatus.setText("서버 연결 끊김");
+        drawPanel.setCanDraw(false);
         txtInput.setEnabled(false);
         btnSend.setEnabled(false);
         btnStart.setVisible(false);
