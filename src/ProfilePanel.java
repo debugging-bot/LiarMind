@@ -1,5 +1,6 @@
 // ProfilePanel.java (프로필 칸 하나: 아바타, 방장 표시, 닉네임, 점수) - 새로 작성
 // WindowBuilder의 Design 탭에서 게임 화면에 보이고, 이 파일 자체도 Design 탭으로 열어 배치를 바꿀 수 있게 별도 파일로 분리
+//  - 3주차에 추가한 점: 점수 표시(setScore), 그리는 사람 강조(setTurn)
 
 import java.awt.Color;
 import java.awt.Dimension;
@@ -25,6 +26,11 @@ public class ProfilePanel extends JPanel {
     private JLabel lblName;
     private JLabel lblScore;
 
+    // 테두리와 윗줄 글자를 다시 그릴 때 필요한 상태
+    private boolean host = false;
+    private boolean me = false;
+    private boolean turn = false;
+
     /**
      * Create the panel.
      */
@@ -43,7 +49,7 @@ public class ProfilePanel extends JPanel {
         lblHost = new JLabel("");
         lblHost.setFont(new Font("맑은 고딕", Font.BOLD, 12));
         lblHost.setForeground(new Color(230, 140, 0));
-        lblHost.setBounds(92, 12, 120, 20);
+        lblHost.setBounds(92, 12, 124, 20);
         add(lblHost);
 
         lblName = new JLabel("");
@@ -61,18 +67,42 @@ public class ProfilePanel extends JPanel {
 
     // 접속자 표시
     public void setUser(String name, boolean host, boolean me) {
+        this.host = host;
+        this.me = me;
+        this.turn = false;
         lblAvatar.setText(name.substring(0, 1)); // 닉네임 첫 글자
         lblAvatar.setBackground(AVATAR_COLORS[Math.floorMod(name.hashCode(), AVATAR_COLORS.length)]);
-        lblHost.setText(host ? "★ 방장" : "");
         lblName.setText(me ? name + " (나)" : name);
         lblName.setForeground(Color.BLACK);
-        lblScore.setText("0점"); // 4주차: /score로 갱신
+        lblScore.setText("0점");
         setBackground(me ? new Color(255, 250, 230) : Color.WHITE);
-        setBorder(new LineBorder(me ? new Color(240, 180, 60) : new Color(190, 190, 190), 2, true));
+        updateLook();
+    }
+
+    // 점수 표시 (/score를 받았을 때, 또 /users로 칸을 다시 채울 때 게임 화면이 불러 준다)
+    public void setScore(int score) {
+        lblScore.setText(score + "점");
+    }
+
+    // 지금 그리는 사람이면 파란 굵은 테두리와 "▶ 그리는 중" 표시
+    public void setTurn(boolean turn) {
+        this.turn = turn;
+        updateLook();
+    }
+
+    private void updateLook() {
+        String top = host ? "★ 방장" : "";
+        if (turn) top = top.isEmpty() ? "▶ 그리는 중" : top + "  ▶ 그리는 중";
+        lblHost.setText(top);
+        if (turn) setBorder(new LineBorder(new Color(30, 120, 220), 4, true));
+        else setBorder(new LineBorder(me ? new Color(240, 180, 60) : new Color(190, 190, 190), 2, true));
     }
 
     // 빈 자리 표시
     public void clear() {
+        host = false;
+        me = false;
+        turn = false;
         lblAvatar.setText("");
         lblAvatar.setBackground(new Color(225, 225, 225));
         lblHost.setText("");
