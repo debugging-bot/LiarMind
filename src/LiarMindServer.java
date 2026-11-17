@@ -5,6 +5,9 @@
 //  - 1주차에 추가한 점: 로그인 검사(빈 이름, 공백, 중복, 최대 8명, 게임 시작 후 접속 거부),
 //                       접속자 목록(/users) 전송, 방장(첫 번째 접속자) 관리, 명령어 switch 처리,
 //                       /chat, /exit 처리, 접속 끊김 시 안전한 정리, 스레드 동기화
+//  - 2주차에 추가한 점: /draw, /clear 중계와 그림 메시지 검사
+//  - 3주차에 추가한 점: 게임 진행(GameRoom), 제시어 목록(WordBank, words.txt), 차례 타이머(java.util.Timer),
+//                       /start, /next, /vote, /guess 처리, 차례인 사람만 그리기, 게임 중 퇴장 처리
 
 import java.awt.EventQueue;
 import java.awt.event.ActionEvent;
@@ -16,6 +19,10 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.Vector;
 
 import javax.swing.JButton;
@@ -45,8 +52,13 @@ public class LiarMindServer extends JFrame {
     // 로그인까지 끝난 사용자만 저장 (Vector 순서 = 접속 순서 = 프로필 칸 순서, 0번이 방장)
     private Vector<UserService> UserVec = new Vector<>();
 
-    // 게임이 시작되면 true (3주차에 /start 처리에서 true로 바꿈). true이면 새 접속을 거부
+    // 게임이 시작되면 true. true이면 새 접속을 거부
+    // 바꾸는 곳: /start (UserVec 잠금 안에서 true), 게임이 끝날 때 (false)
     private volatile boolean gameStarted = false;
+
+    private final WordBank words = new WordBank("words.txt"); // 제시어 목록 (프로젝트 폴더의 words.txt)
+    private final GameRoom game = new GameRoom(words);         // 게임 진행 상태 (스레드가 아닌 공유 객체)
+    private final Timer timer = new Timer(true);               // 차례·투표 시간을 재는 스레드 1개 (데몬)
 
     public static void main(String[] args) {
         EventQueue.invokeLater(new Runnable() {
@@ -100,6 +112,7 @@ public class LiarMindServer extends JFrame {
                     return;
                 }
                 AppendText("LiarMind Server Running.. (port " + txtPortNumber.getText().trim() + ")");
+                AppendText("제시어: " + words.summary());
                 btnServerStart.setText("LiarMind Server Running..");
                 btnServerStart.setEnabled(false); // 서버를 더이상 실행시키지 못 하게 막는다
                 txtPortNumber.setEnabled(false);  // 더이상 포트번호 수정못 하게 막는다
@@ -211,14 +224,48 @@ public class LiarMindServer extends JFrame {
         return width >= 1 && width <= MAX_STROKE_WIDTH;
     }
 
+    // 이름으로 접속자 찾기 (없으면 null)
+    private UserService findUser(String name) {
+        synchronized (UserVec) {
+            for (UserService u : UserVec) {
+                if (u.UserName.equals(name)) return u;
+            }
+        }
+        return null;
+    }
+
+    // GameRoom이 돌려준 Outbox를 실제로 보낸다 (GameRoom의 잠금이 풀린 뒤에 부른다)
+    private void send(GameRoom.Outbox box) {
+        for (GameRoom.Out o : box.list) {
+            if (o.to == null) {
+                WriteAll(o.msg);
+                AppendText("[게임] " + o.msg);
+            } else {
+                UserService u = findUser(o.to);
+                if (u != null) u.WriteOne(o.msg);
+                AppendText("[게임 → " + o.to + "] " + o.msg);
+            }
+        }
+        if (box.gameEnded) gameStarted = false; // 대기실로 돌아왔으므로 다시 입장 가능
+        if (box.timerSeconds > 0) {
+            final int token = box.timerToken;
+            // 정해진 시간 뒤에 타이머 스레드가 run()을 부른다. 그 사이 단계가 바뀌었으면 GameRoom이 무시한다
+            timer.schedule(new TimerTask() {
+                public void run() {
+                    send(game.onTimeout(token));
+                }
+            }, box.timerSeconds * 1000L);
+        }
+    }
+
     // 닉네임 검사. 문제가 없으면 null, 문제가 있으면 /reject 뒤에 붙일 이유를 돌려준다
     // 접속 인원 확인과 목록 추가를 한 번에 해야 하므로 UserVec으로 동기화
     private String tryLogin(UserService user, String name) {
         if (name.isEmpty()) return "empty";                    // 이름 없음
         if (name.contains(" ") || name.contains(",")) return "invalid"; // 공백, 쉼표 금지 (메시지 구분자이므로)
         if (name.length() > MAX_NAME_LENGTH) return "toolong"; // 너무 긴 이름
-        if (gameStarted) return "started";                     // 게임 진행 중
         synchronized (UserVec) {
+            if (gameStarted) return "started";               // 게임 진행 중 (/start와 같은 잠금 안에서 확인)
             if (UserVec.size() >= MAX_USERS) return "full";    // 8명 초과
             for (UserService u : UserVec) {
                 if (u.UserName.equals(name)) return "duplicate"; // 중복 닉네임
@@ -295,7 +342,22 @@ public class LiarMindServer extends JFrame {
                 AppendText("[" + UserName + "] 퇴장");
                 WriteAll("/system " + UserName + "님이 퇴장했습니다.");
                 sendUserList(); // 방장이 나가면 다음 사람이 0번이 되어 자동으로 방장이 됨
+                send(game.playerLeft(UserName)); // 게임 중이었다면 차례 넘기기, 투표 다시 세기, 게임 중단 등
             }
+        }
+
+        // /start 바퀴수: 방장만. 접속자 목록 복사와 gameStarted = true를 한 번에 해야
+        // 시작하는 순간 들어온 사람이 게임에 끼지 못한 채 남는 일이 없다
+        // 잠금 순서: UserVec -> GameRoom (반대 순서로 잡는 곳은 없다)
+        private void startGame(String body) {
+            GameRoom.Outbox box;
+            synchronized (UserVec) {
+                List<String> names = new ArrayList<>();
+                for (UserService u : UserVec) names.add(u.UserName);
+                box = game.start(UserName, names, body);
+                if (game.getPhase() != GameRoom.Phase.WAITING) gameStarted = true;
+            }
+            send(box); // 전송은 잠금 밖에서
         }
 
         // 첫 메시지는 반드시 "/login 닉네임"
@@ -346,7 +408,8 @@ public class LiarMindServer extends JFrame {
 
                         case "/draw": // 선분 하나: "/draw x1 y1 x2 y2 색RGB 굵기"
                             // 형식이 맞는 것만 모두에게 그대로 전달 (보낸 사람 포함: 모든 화면의 그림이 항상 같게)
-                            // 3주차: 현재 차례인 사람이 보낸 것만 전달하도록 검사 추가
+                            // 게임 중에는 지금 그릴 차례인 사람의 것만 전달 (1초에 수십 개라 안내 메시지 없이 무시)
+                            if (!game.canDraw(UserName)) break;
                             if (isValidDraw(body)) {
                                 WriteAll("/draw " + body.trim());
                             } else {
@@ -355,14 +418,30 @@ public class LiarMindServer extends JFrame {
                             break;
 
                         case "/clear": // 그림판 전체 지우기
-                            WriteAll("/clear");
+                            if (game.canDraw(UserName)) WriteAll("/clear");
+                            else WriteOne("/system 지금은 그림판을 지울 수 없습니다.");
+                            break;
+
+                        case "/start": // 게임 시작: "/start 바퀴수" (방장만)
+                            startGame(body);
+                            break;
+
+                        case "/next": // 다음 차례로 (그리는 사람만)
+                            send(game.next(UserName));
+                            break;
+
+                        case "/vote": // 투표: "/vote 이름"
+                            send(game.vote(UserName, body));
+                            break;
+
+                        case "/guess": // 라이어의 정답: "/guess 단어"
+                            send(game.guess(UserName, body));
                             break;
 
                         case "/exit": // 종료 명령
                             logout();
                             return;
 
-                        // 3주차: /start, /next, /vote, /guess
                         default:
                             WriteOne("/system 알 수 없는 명령어입니다: " + cmd);
                             break;
