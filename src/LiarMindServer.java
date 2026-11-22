@@ -8,6 +8,8 @@
 //  - 2주차에 추가한 점: /draw, /clear 중계와 그림 메시지 검사
 //  - 3주차에 추가한 점: 게임 진행(GameRoom), 제시어 목록(WordBank, words.txt), 차례 타이머(java.util.Timer),
 //                       /start, /next, /vote, /guess 처리, 차례인 사람만 그리기, 게임 중 퇴장 처리
+//  - 4주차에 추가한 점: 게임 중 전체 지우기 금지, 준비(/ready), 캐릭터 번호 배정(/avatars),
+//                       그리는 순서 무작위·동점자 다시 투표 (GameRoom)
 
 import java.awt.EventQueue;
 import java.awt.event.ActionEvent;
@@ -21,8 +23,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.Vector;
 
 import javax.swing.JButton;
@@ -41,6 +46,8 @@ public class LiarMindServer extends JFrame {
 
     public static final int MAX_USERS = 8;          // 프로필 칸이 좌우 4칸씩이므로 최대 8명
     public static final int MAX_NAME_LENGTH = 10;   // 프로필 칸에 들어갈 수 있는 닉네임 길이
+    public static final int AVATAR_COUNT = 8;       // 캐릭터 그림 수 (images/avatar/avatar1.png ~ avatar8.png)
+    private final Random random = new Random();
 
     private JPanel contentPane;
     private JTextArea textArea;
@@ -57,7 +64,9 @@ public class LiarMindServer extends JFrame {
     private volatile boolean gameStarted = false;
 
     private final WordBank words = new WordBank("words.txt"); // 제시어 목록 (프로젝트 폴더의 words.txt)
-    private final GameRoom game = new GameRoom(words);         // 게임 진행 상태 (스레드가 아닌 공유 객체)
+    // 게임 메시지 줄: GameRoom이 넣고, 보내는 스레드(GameSender) 하나가 넣은 순서대로 꺼내 보낸다
+    private final BlockingQueue<GameRoom.Outbox> outQueue = new LinkedBlockingQueue<>();
+    private final GameRoom game = new GameRoom(words, outQueue); // 게임 진행 상태 (스레드가 아닌 공유 객체)
     private final Timer timer = new Timer(true);               // 차례·투표 시간을 재는 스레드 1개 (데몬)
 
     public static void main(String[] args) {
@@ -118,6 +127,9 @@ public class LiarMindServer extends JFrame {
                 txtPortNumber.setEnabled(false);  // 더이상 포트번호 수정못 하게 막는다
                 AcceptServer accept_server = new AcceptServer();
                 accept_server.start();
+                GameSender sender = new GameSender();
+                sender.setDaemon(true); // 서버 창을 닫으면 같이 끝남
+                sender.start();
             }
         });
         btnServerStart.setBounds(12, 374, 380, 35);
@@ -138,6 +150,20 @@ public class LiarMindServer extends JFrame {
             if (socket != null && !socket.isClosed()) socket.close();
         } catch (IOException e) {
             // 종료 중이므로 무시
+        }
+    }
+
+    // 게임 메시지를 보내는 스레드 (하나뿐). 줄에서 하나씩 꺼내 넣은 순서대로 보낸다
+    // 여러 스레드가 각자 보내면 "(2/4)" 다음에 "(1/4)"가 도착하는 것처럼 순서가 뒤바뀔 수 있어서 4주차에 추가
+    class GameSender extends Thread {
+        public void run() {
+            while (true) {
+                try {
+                    send(outQueue.take()); // 줄이 비어 있으면 들어올 때까지 기다린다
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
         }
     }
 
@@ -200,12 +226,43 @@ public class LiarMindServer extends JFrame {
         }
     }
 
-    // 접속자 목록이 바뀔 때마다 모두에게 /users 전송
+    // 접속자마다 캐릭터 번호를 "이름1:번호,이름2:번호" 형태로 (순서는 /users와 같음)
+    private String makeAvatarList() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (UserVec) {
+            for (int i = 0; i < UserVec.size(); i++) {
+                if (i > 0) sb.append(",");
+                sb.append(UserVec.get(i).UserName).append(":").append(UserVec.get(i).avatar);
+            }
+        }
+        return sb.toString();
+    }
+
+    // 아직 아무도 쓰지 않는 캐릭터 번호(1~8) 중 하나를 무작위로 고른다 (UserVec 잠금 안에서만 부른다)
+    private int pickAvatar() {
+        List<Integer> free = new ArrayList<>();
+        for (int n = 1; n <= AVATAR_COUNT; n++) free.add(n);
+        for (UserService u : UserVec) free.remove(Integer.valueOf(u.avatar));
+        return free.get(random.nextInt(free.size())); // 최대 8명이므로 항상 하나 이상 남아 있다
+    }
+
+    // 접속자 목록이 바뀔 때마다 모두에게 /users, /avatars, /ready 전송
     public void sendUserList() {
         String list = makeUserList();
         int count = list.isEmpty() ? 0 : list.split(",").length; // 보낸 목록 기준으로 세야 로그와 목록이 일치
         WriteAll("/users " + list);
+        WriteAll("/avatars " + makeAvatarList());
         AppendText("현재 참가자(" + count + "명): " + list);
+        synchronized (UserVec) { // 잠금 순서: UserVec -> GameRoom
+            game.usersChanged(copyNames()); // 나간 사람, 새 방장을 준비 목록에서 빼고 /ready 다시 전송
+        }
+    }
+
+    // 접속자 이름 목록 복사 (UserVec 잠금 안에서 부른다, 0번이 방장)
+    private List<String> copyNames() {
+        List<String> names = new ArrayList<>();
+        for (UserService u : UserVec) names.add(u.UserName);
+        return names;
     }
 
     // /draw 뒤의 값 검사: 정수 6개(x1 y1 x2 y2 색RGB 굵기)이고 굵기가 1~50이면 true
@@ -234,7 +291,7 @@ public class LiarMindServer extends JFrame {
         return null;
     }
 
-    // GameRoom이 돌려준 Outbox를 실제로 보낸다 (GameRoom의 잠금이 풀린 뒤에 부른다)
+    // Outbox를 실제로 보낸다 (보내는 스레드 GameSender만 부른다)
     private void send(GameRoom.Outbox box) {
         for (GameRoom.Out o : box.list) {
             if (o.to == null) {
@@ -252,7 +309,7 @@ public class LiarMindServer extends JFrame {
             // 정해진 시간 뒤에 타이머 스레드가 run()을 부른다. 그 사이 단계가 바뀌었으면 GameRoom이 무시한다
             timer.schedule(new TimerTask() {
                 public void run() {
-                    send(game.onTimeout(token));
+                    game.onTimeout(token); // 결과는 줄에 들어가고 보내는 스레드가 보낸다
                 }
             }, box.timerSeconds * 1000L);
         }
@@ -271,6 +328,7 @@ public class LiarMindServer extends JFrame {
                 if (u.UserName.equals(name)) return "duplicate"; // 중복 닉네임
             }
             user.UserName = name;
+            user.avatar = pickAvatar(); // 다른 사람과 겹치지 않는 캐릭터 번호
             UserVec.add(user);  // 검사를 통과한 사람만 목록에 추가
         }
         return null;
@@ -282,6 +340,7 @@ public class LiarMindServer extends JFrame {
         private DataInputStream dis;
         private DataOutputStream dos;
         private String UserName = "";
+        private int avatar = 0; // 캐릭터 번호 1~8 (로그인할 때 정해짐)
         private boolean loggedIn = false;
         private boolean closed = false;
 
@@ -342,7 +401,7 @@ public class LiarMindServer extends JFrame {
                 AppendText("[" + UserName + "] 퇴장");
                 WriteAll("/system " + UserName + "님이 퇴장했습니다.");
                 sendUserList(); // 방장이 나가면 다음 사람이 0번이 되어 자동으로 방장이 됨
-                send(game.playerLeft(UserName)); // 게임 중이었다면 차례 넘기기, 투표 다시 세기, 게임 중단 등
+                game.playerLeft(UserName); // 게임 중이었다면 차례 넘기기, 투표 다시 세기, 게임 중단 등
             }
         }
 
@@ -350,14 +409,10 @@ public class LiarMindServer extends JFrame {
         // 시작하는 순간 들어온 사람이 게임에 끼지 못한 채 남는 일이 없다
         // 잠금 순서: UserVec -> GameRoom (반대 순서로 잡는 곳은 없다)
         private void startGame(String body) {
-            GameRoom.Outbox box;
             synchronized (UserVec) {
-                List<String> names = new ArrayList<>();
-                for (UserService u : UserVec) names.add(u.UserName);
-                box = game.start(UserName, names, body);
+                game.start(UserName, copyNames(), body); // 보낼 메시지는 줄에 들어가고 보내는 스레드가 보낸다
                 if (game.getPhase() != GameRoom.Phase.WAITING) gameStarted = true;
             }
-            send(box); // 전송은 잠금 밖에서
         }
 
         // 첫 메시지는 반드시 "/login 닉네임"
@@ -417,9 +472,15 @@ public class LiarMindServer extends JFrame {
                             }
                             break;
 
-                        case "/clear": // 그림판 전체 지우기
-                            if (game.canDraw(UserName)) WriteAll("/clear");
-                            else WriteOne("/system 지금은 그림판을 지울 수 없습니다.");
+                        case "/clear": // 그림판 전체 지우기: 대기실에서만 (게임 중에는 남의 그림까지 지워지므로 지우개만)
+                            if (game.canClear()) WriteAll("/clear");
+                            else WriteOne("/system 게임 중에는 전체 지우기를 쓸 수 없습니다. 지우개를 사용하세요.");
+                            break;
+
+                        case "/ready": // 준비 / 준비 취소 (방장 제외, 대기실에서만)
+                            synchronized (UserVec) { // 잠금 순서: UserVec -> GameRoom
+                                game.toggleReady(UserName, copyNames());
+                            }
                             break;
 
                         case "/start": // 게임 시작: "/start 바퀴수" (방장만)
@@ -427,15 +488,15 @@ public class LiarMindServer extends JFrame {
                             break;
 
                         case "/next": // 다음 차례로 (그리는 사람만)
-                            send(game.next(UserName));
+                            game.next(UserName);
                             break;
 
                         case "/vote": // 투표: "/vote 이름"
-                            send(game.vote(UserName, body));
+                            game.vote(UserName, body);
                             break;
 
                         case "/guess": // 라이어의 정답: "/guess 단어"
-                            send(game.guess(UserName, body));
+                            game.guess(UserName, body);
                             break;
 
                         case "/exit": // 종료 명령
