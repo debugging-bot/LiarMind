@@ -11,6 +11,8 @@
 //  - 3주차에 추가한 점: 바퀴 수 선택과 /start, /word 제시어 표시(라이어는 카테고리만),
 //                       /turn으로 내 차례에만 그리기·다음 버튼, 그리는 사람 프로필 강조,
 //                       /votestart 투표 창, /guessstart 라이어 정답 창, /result 결과 창, /score 점수 표시
+//  - 4주차에 추가한 점: 준비 버튼(/ready), 캐릭터 그림(/avatars, 파일이 없으면 글자), 동점 재투표 창(/votestart 후보),
+//                       게임 중에는 '내 그림 전체 지우기'(/clear 이름: 그린 사람의 선만 지움), 남은 시간 표시(javax.swing.Timer, 5초 이하 빨간색)
 //  - WindowBuilder: 화면 배치는 모두 생성자 안에 setBounds로 작성해서 Design 탭에서 보이고 수정할 수 있다
 
 import java.awt.BorderLayout;
@@ -18,6 +20,7 @@ import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.WindowAdapter;
@@ -28,9 +31,12 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import javax.swing.DefaultComboBoxModel;
+import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JDialog;
@@ -43,6 +49,7 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import javax.swing.border.TitledBorder;
@@ -75,8 +82,10 @@ public class LiarMindClientView extends JFrame {
     private JLabel lblRounds;       // "바퀴 수" (3주차, 방장에게만 보임)
     private JComboBox<String> cmbRounds;
     private JButton btnStart;
+    private JButton btnReady;       // 준비 / 준비 취소 (4주차, 방장이 아닌 사람에게만 보임)
     private JButton btnNext;
     private JButton btnExit;
+    private JLabel lblTimer;        // 남은 시간 (4주차)
 
     // 프로필 칸 8개: 왼쪽 위→아래(0~3), 오른쪽 위→아래(4~7)
     private ProfilePanel slot0;
@@ -112,6 +121,15 @@ public class LiarMindClientView extends JFrame {
     private JDialog voteDialog;                             // 열려 있는 투표 창
     private JDialog guessDialog;                            // 열려 있는 정답 입력 창
 
+    // 4주차
+    private final Set<String> readyNames = new HashSet<>();      // /ready로 받은 준비한 사람
+    private final Map<String, Integer> avatars = new HashMap<>(); // /avatars로 받은 캐릭터 번호
+    private static final int VOTE_SECONDS = 30;             // 투표 제한시간 (README 기준, 서버가 따로 보내지 않음)
+    private static final int GUESS_SECONDS = 20;            // 라이어 정답 제한시간 (README 기준)
+    private Timer countdown;                                // 1초마다 남은 시간을 줄이는 스윙 타이머
+    private int secondsLeft;
+    private String countdownLabel = "";
+
     /**
      * Create the frame.
      * 화면만 만들고 보이지는 않는다. connect() 후 서버가 /loginok를 보내면 보인다.
@@ -144,6 +162,12 @@ public class LiarMindClientView extends JFrame {
         lblWord.setBorder(new LineBorder(new Color(230, 210, 160), 1, true));
         lblWord.setBounds(260, 40, 560, 34);
         contentPane.add(lblWord);
+
+        lblTimer = new JLabel("남은 시간 20초");
+        lblTimer.setHorizontalAlignment(SwingConstants.CENTER);
+        lblTimer.setFont(new Font("맑은 고딕", Font.BOLD, 18));
+        lblTimer.setBounds(840, 40, 220, 34);
+        contentPane.add(lblTimer);
 
         // ── 가운데: 그림판 (560×420) ──
         // 테두리는 그림판 바깥에 따로 그린다 (그림판 안에 테두리를 넣으면 그림 좌표가 테두리 두께만큼 밀림)
@@ -257,7 +281,8 @@ public class LiarMindClientView extends JFrame {
 
         btnClear = new JButton("전체 지우기");
         btnClear.setFont(new Font("맑은 고딕", Font.PLAIN, 12));
-        btnClear.setBounds(286, 18, 120, 24);
+        btnClear.setMargin(new Insets(2, 2, 2, 2));  // 글자가 길어 버튼 안쪽 여백을 줄임
+        btnClear.setBounds(286, 18, 128, 24);
         colorPanel.add(btnClear);
 
         // 2줄: 굵기 3단계, 지금 도구 표시
@@ -297,6 +322,11 @@ public class LiarMindClientView extends JFrame {
         btnStart.setBounds(640, 640, 205, 56);
         contentPane.add(btnStart);
 
+        btnReady = new JButton("준비");
+        btnReady.setFont(new Font("맑은 고딕", Font.BOLD, 15));
+        btnReady.setBounds(640, 606, 205, 90);
+        contentPane.add(btnReady);
+
         btnNext = new JButton("다음 차례");
         btnNext.setFont(new Font("맑은 고딕", Font.BOLD, 15));
         btnNext.setBounds(855, 606, 205, 90);
@@ -313,6 +343,8 @@ public class LiarMindClientView extends JFrame {
         lblRounds.setVisible(false);
         cmbRounds.setVisible(false);
         cmbRounds.setSelectedIndex(1); // 기본 2바퀴
+        btnReady.setVisible(false); // 방장이 아닌 사람에게만 보임 (/users 받을 때 결정)
+        lblTimer.setText("");       // 차례·투표·정답 시간에만 표시
         btnNext.setEnabled(false);  // 내 차례일 때만 켜짐 (/turn)
 
         drawPanel.setView(this);    // 그림판이 서버로 /draw를 보낼 수 있게 연결
@@ -351,6 +383,13 @@ public class LiarMindClientView extends JFrame {
             public void actionPerformed(ActionEvent e) {
                 btnNext.setEnabled(false); // 두 번 눌러 차례를 두 칸 넘기지 않게 (다음 /turn에서 다시 결정)
                 SendMessage("/next");
+            }
+        });
+
+        // 준비 버튼: 누를 때마다 준비 ↔ 준비 취소 (실제 상태는 서버가 돌려준 /ready 목록으로 표시)
+        btnReady.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                SendMessage("/ready");
             }
         });
 
@@ -462,8 +501,9 @@ public class LiarMindClientView extends JFrame {
                 handleDraw(body);
                 break;
 
-            case "/clear": // 그림판 전체 지우기
-                drawPanel.clearCanvas();
+            case "/clear": // "/clear" 전체 지우기 (대기실, 게임 시작 때), "/clear 이름" 그 사람이 그린 선만 지우기 (게임 중, 4주차)
+                if (body.trim().isEmpty()) drawPanel.clearCanvas();
+                else drawPanel.clearOwner(body.trim());
                 break;
 
             case "/word": // "/word 카테고리 제시어" (라이어는 제시어 자리에 ?)
@@ -474,17 +514,22 @@ public class LiarMindClientView extends JFrame {
                 handleTurn(body);
                 break;
 
-            case "/votestart": // 투표 시작
+            case "/votestart": { // "/votestart" 투표 시작, "/votestart 이름1,이름2" 동점자끼리 재투표 (4주차)
                 currentDrawer = null;
                 setDrawing(false);
                 btnNext.setEnabled(false);
                 refreshSlots();
-                lblStatus.setText("투표 중 · 라이어라고 생각하는 사람을 고르세요");
-                openVoteDialog();
+                boolean revote = !body.trim().isEmpty();
+                String[] candidates = revote ? body.trim().split(",") : userNames;
+                lblStatus.setText(revote ? "동점! 후보 중에서 다시 투표하세요" : "투표 중 · 라이어라고 생각하는 사람을 고르세요");
+                startCountdown("투표", VOTE_SECONDS);
+                openVoteDialog(candidates, revote);
                 break;
+            }
 
             case "/guessstart": { // "/guessstart 라이어이름" → 라이어에게만 정답 입력 창
                 closeDialog(voteDialog);
+                startCountdown("정답", GUESS_SECONDS);
                 String liar = body.trim();
                 if (liar.equals(UserName)) {
                     lblStatus.setText("당신이 지목되었습니다! 제시어를 맞히세요");
@@ -501,6 +546,30 @@ public class LiarMindClientView extends JFrame {
 
             case "/score": // "/score 이름:점수,이름:점수"
                 handleScore(body);
+                break;
+
+            case "/ready": // "/ready 이름1,이름2" 준비한 사람 목록 (아무도 없으면 "/ready"만 옴)
+                readyNames.clear();
+                for (String n : body.trim().split(",")) {
+                    if (!n.isEmpty()) readyNames.add(n);
+                }
+                refreshSlots();
+                updateHostControls();
+                if (!inGame) showWaitingStatus();
+                break;
+
+            case "/avatars": // "/avatars 이름1:번호,이름2:번호" 캐릭터 번호 (/users 바로 뒤에 옴)
+                avatars.clear();
+                for (String item : body.trim().split(",")) {
+                    String[] kv = item.split(":");
+                    if (kv.length != 2) continue;
+                    try {
+                        avatars.put(kv[0], Integer.parseInt(kv[1].trim()));
+                    } catch (NumberFormatException e) {
+                        // 숫자가 아니면 그 사람은 글자로 표시
+                    }
+                }
+                refreshSlots();
                 break;
 
             default:
@@ -522,7 +591,9 @@ public class LiarMindClientView extends JFrame {
             int rgb = Integer.parseInt(v[4]);
             int w = Integer.parseInt(v[5]);
             if (w < 1 || w > 50) return; // 말도 안 되는 굵기도 무시
-            drawPanel.drawLine(x1, y1, x2, y2, rgb, w);
+            // 게임 중에는 서버가 지금 차례인 사람의 /draw만 전달하므로, 이 선의 주인은 /turn으로 받은 사람이다
+            // (새 차례의 사람은 /turn을 받은 뒤에야 그릴 수 있고, 차례가 끝난 사람의 /draw는 서버가 버린다)
+            drawPanel.drawLine(inGame ? currentDrawer : null, x1, y1, x2, y2, rgb, w);
         } catch (NumberFormatException e) {
             // 숫자가 아닌 값이 섞인 메시지는 그리지 않는다
         }
@@ -573,8 +644,10 @@ public class LiarMindClientView extends JFrame {
             if (i < userNames.length) {
                 String n = userNames[i];
                 slots[i].setUser(n, i == 0, n.equals(UserName));
+                slots[i].setAvatar(avatars.getOrDefault(n, 0)); // 그림 파일이 없으면 글자 그대로
                 slots[i].setScore(scores.getOrDefault(n, 0));
                 slots[i].setTurn(n.equals(currentDrawer));
+                slots[i].setReady(!inGame && readyNames.contains(n));
             } else {
                 slots[i].clear(); // 남은 칸은 비운다 (누가 나가면 뒤 사람이 앞으로 당겨짐)
             }
@@ -582,22 +655,56 @@ public class LiarMindClientView extends JFrame {
     }
 
     // 방장 화면에만, 그리고 대기 중일 때만 바퀴 수 선택과 시작 버튼을 보여준다
+    // 방장이 아닌 사람에게는 대기 중일 때 준비 버튼을 보여준다 (4주차)
     private void updateHostControls() {
         boolean show = isHost && !inGame;
         btnStart.setVisible(show);
         lblRounds.setVisible(show);
         cmbRounds.setVisible(show);
+        btnReady.setVisible(!isHost && !inGame);
+        btnReady.setText(readyNames.contains(UserName) ? "준비 취소" : "준비");
     }
 
+    // 대기 중 표시: 인원과 준비한 사람 수 (방장은 준비하지 않으므로 방장을 뺀 인원 기준)
     private void showWaitingStatus() {
-        lblStatus.setText("대기 중 (" + userCount + "/" + slots.length + "명)" + (isHost ? "  ·  내가 방장입니다" : ""));
+        int others = Math.max(userCount - 1, 0);
+        String ready = "  ·  준비 " + readyNames.size() + "/" + others + "명";
+        lblStatus.setText("대기 중 (" + userCount + "/" + slots.length + "명)" + ready + (isHost ? "  ·  내가 방장입니다" : ""));
     }
 
     // 그릴 수 있는지: 그림판과 전체 지우기 버튼을 함께 켜고 끈다
-    // (서버도 게임 중에는 차례인 사람의 /draw·/clear만 받으므로, 화면에서도 미리 막아 둔다)
+    // 4주차: 게임 중에는 같은 버튼이 '내 그림 전체 지우기'가 된다 (서버가 "/clear 내이름"으로 모두에게 알려 내 선만 지워짐)
     private void setDrawing(boolean can) {
         drawPanel.setCanDraw(can);
+        btnClear.setText(inGame ? "내 그림 전체 지우기" : "전체 지우기");
         btnClear.setEnabled(can);
+    }
+
+    // 남은 시간 표시 (4주차): javax.swing.Timer는 1초마다 EDT에서 실행되므로 화면을 바로 바꿔도 안전하다
+    // 시간이 다 되어도 클라이언트는 아무것도 보내지 않는다 (다음 단계로 넘기는 것은 서버의 타이머)
+    private void startCountdown(String label, int seconds) {
+        stopCountdown();
+        countdownLabel = label;
+        secondsLeft = seconds;
+        showCountdown();
+        countdown = new Timer(1000, new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                secondsLeft--;
+                showCountdown();
+                if (secondsLeft <= 0) countdown.stop();
+            }
+        });
+        countdown.start();
+    }
+
+    private void showCountdown() {
+        lblTimer.setText(countdownLabel + " " + Math.max(secondsLeft, 0) + "초");
+        lblTimer.setForeground(secondsLeft <= 5 ? Color.RED : new Color(40, 40, 40)); // 5초 이하면 빨간색
+    }
+
+    private void stopCountdown() {
+        if (countdown != null) countdown.stop();
+        lblTimer.setText("");
     }
 
     // "/word 과일 사과" → 제시어 표시, "/word 과일 ?" → 라이어 표시 (게임 시작)
@@ -630,30 +737,43 @@ public class LiarMindClientView extends JFrame {
         setDrawing(myTurn);
         btnNext.setEnabled(myTurn);
         refreshSlots();                 // 그리는 사람 칸 강조
-        String time = limit.isEmpty() ? "" : "  (" + limit + "초)";
-        if (myTurn) lblStatus.setText(round + "바퀴 · 내 차례입니다! 그린 뒤 '다음 차례'를 누르세요" + time);
-        else lblStatus.setText(round + "바퀴 · " + currentDrawer + " 차례" + time);
+        if (myTurn) lblStatus.setText(round + "바퀴 · 내 차례입니다! 그린 뒤 '다음 차례'를 누르세요");
+        else lblStatus.setText(round + "바퀴 · " + currentDrawer + " 차례");
+        try {
+            startCountdown(myTurn ? "내 차례" : "차례", Integer.parseInt(limit));
+        } catch (NumberFormatException e) {
+            stopCountdown(); // 제한시간이 없거나 숫자가 아니면 표시하지 않음
+        }
     }
 
-    // 투표 창: 나를 뺀 참가자 이름 버튼. 누르면 /vote 이름을 보내고 닫는다
+    // 투표 창: 후보 중 나를 뺀 사람의 이름 버튼(캐릭터 그림이 있으면 같이). 누르면 /vote 이름을 보내고 닫는다
+    // 처음 투표는 모든 참가자, 동점 재투표(4주차)는 서버가 보낸 동점자만 후보
     // 모달이 아닌 창으로 띄운다 (창이 떠 있는 동안에도 채팅·시스템 메시지를 계속 받을 수 있게)
-    private void openVoteDialog() {
+    private void openVoteDialog(String[] candidates, boolean revote) {
         closeDialog(voteDialog);
-        voteDialog = new JDialog(this, "투표", false);
+        voteDialog = new JDialog(this, revote ? "다시 투표" : "투표", false);
         voteDialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
         voteDialog.getContentPane().setLayout(new BorderLayout(0, 10));
 
-        JLabel guide = new JLabel("라이어라고 생각하는 사람을 고르세요 (30초)", SwingConstants.CENTER);
+        String text = revote ? "동점입니다! 후보 중에서 다시 고르세요 (" + VOTE_SECONDS + "초)"
+                             : "라이어라고 생각하는 사람을 고르세요 (" + VOTE_SECONDS + "초)";
+        JLabel guide = new JLabel(text, SwingConstants.CENTER);
         guide.setFont(new Font("맑은 고딕", Font.BOLD, 14));
         guide.setBorder(new EmptyBorder(14, 14, 0, 14));
         voteDialog.getContentPane().add(guide, BorderLayout.NORTH);
 
         JPanel buttons = new JPanel(new GridLayout(0, 2, 8, 8));
         buttons.setBorder(new EmptyBorder(4, 14, 14, 14));
-        for (String n : userNames) {
+        for (String n : candidates) {
             if (n.equals(UserName)) continue; // 자기 자신에게는 투표할 수 없음
             JButton b = new JButton(n);
             b.setFont(new Font("맑은 고딕", Font.BOLD, 14));
+            ImageIcon icon = ProfilePanel.loadIcon("avatar", avatars.getOrDefault(n, 0));
+            if (icon != null) { // 캐릭터 그림을 이름 위에 (파일이 없으면 이름만)
+                b.setIcon(icon);
+                b.setVerticalTextPosition(SwingConstants.BOTTOM);
+                b.setHorizontalTextPosition(SwingConstants.CENTER);
+            }
             b.addActionListener(new ActionListener() {
                 public void actionPerformed(ActionEvent e) {
                     SendMessage("/vote " + n);
@@ -715,6 +835,7 @@ public class LiarMindClientView extends JFrame {
         // 대기 상태로 되돌리기 (결과 창을 닫기 전에 해 둔다: 그 사이 새 게임이 시작돼도 꼬이지 않게)
         closeDialog(voteDialog);
         closeDialog(guessDialog);
+        stopCountdown();
         boolean wasLiar = amLiar;
         inGame = false;
         amLiar = false;
@@ -746,6 +867,12 @@ public class LiarMindClientView extends JFrame {
                 + "라이어: " + liar + "<br>제시어: " + word + "<br><br>" + mine + "</center></html>", SwingConstants.CENTER);
         content.setFont(new Font("맑은 고딕", Font.PLAIN, 15));
         content.setBorder(new EmptyBorder(20, 30, 10, 30));
+        ImageIcon liarIcon = ProfilePanel.loadIcon("avatar_big", avatars.getOrDefault(liar, 0)); // 160×160 큰 그림
+        if (liarIcon != null) { // 라이어의 캐릭터를 글자 위에 (파일이 없으면 글자만)
+            content.setIcon(liarIcon);
+            content.setVerticalTextPosition(SwingConstants.BOTTOM);
+            content.setHorizontalTextPosition(SwingConstants.CENTER);
+        }
         dlg.getContentPane().add(content, BorderLayout.CENTER);
         JButton ok = new JButton("확인");
         ok.addActionListener(new ActionListener() {
@@ -814,10 +941,12 @@ public class LiarMindClientView extends JFrame {
         lblStatus.setText("서버 연결 끊김");
         closeDialog(voteDialog);
         closeDialog(guessDialog);
+        stopCountdown();
         setDrawing(false);
         txtInput.setEnabled(false);
         btnSend.setEnabled(false);
         btnStart.setVisible(false);
+        btnReady.setVisible(false);
         lblRounds.setVisible(false);
         cmbRounds.setVisible(false);
         btnNext.setEnabled(false);

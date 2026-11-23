@@ -4,6 +4,8 @@
 //  - 마우스로 그릴 때는 화면에 직접 그리지 않고 "/draw x1 y1 x2 y2 색 굵기"를 서버로 보내기만 한다.
 //    서버가 모두에게(나 포함) 돌려준 /draw를 받았을 때 drawLine()으로 그린다 → 모든 화면의 그림이 항상 같다.
 //  - WindowBuilder에서 쓸 수 있도록 매개변수 없는 생성자를 두고, 게임 화면(view)은 setView()로 나중에 연결한다.
+//  - 4주차: 받은 선분을 "누가 그렸는지"와 함께 목록(strokes)에도 저장한다.
+//    게임 중 "/clear 이름"을 받으면 그 사람의 선분만 목록에서 빼고, 남은 선분으로 그림을 처음부터 다시 그린다.
 
 import java.awt.BasicStroke;
 import java.awt.Color;
@@ -14,6 +16,8 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.swing.JPanel;
 
@@ -36,6 +40,16 @@ public class DrawPanel extends JPanel {
     private boolean canDraw = false;
 
     private int lastX, lastY;                   // 직전 마우스 위치 (선분의 시작점)
+
+    // 4주차: 지금까지 받은 선분 목록 (그린 사람, 좌표, 색, 굵기). "내 그림 지우기" 때 다시 그리는 데 쓴다
+    private static class Stroke {
+        final String owner;                     // 그린 사람 (대기실 낙서처럼 모르면 null)
+        final int x1, y1, x2, y2, rgb, w;
+        Stroke(String owner, int x1, int y1, int x2, int y2, int rgb, int w) {
+            this.owner = owner; this.x1 = x1; this.y1 = y1; this.x2 = x2; this.y2 = y2; this.rgb = rgb; this.w = w;
+        }
+    }
+    private final List<Stroke> strokes = new ArrayList<>();
 
     /**
      * Create the panel.
@@ -116,19 +130,39 @@ public class DrawPanel extends JPanel {
     }
 
     // 서버에서 받은 /draw를 그린다 (EDT에서 호출)
-    public void drawLine(int x1, int y1, int x2, int y2, int rgb, int w) {
+    // owner: 그린 사람. 게임 중에는 지금 차례인 사람만 그릴 수 있으므로 게임 화면이 /turn으로 받은 이름을 넘겨 준다
+    public void drawLine(String owner, int x1, int y1, int x2, int y2, int rgb, int w) {
+        Stroke s = new Stroke(owner, x1, y1, x2, y2, rgb, w);
+        strokes.add(s);
         Graphics2D g = canvas.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setColor(new Color(rgb));
-        g.setStroke(new BasicStroke(w, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)); // 끝이 둥글어야 선분 이음새가 매끄럽다
-        g.drawLine(x1, y1, x2, y2);
+        paintStroke(g, s);
         g.dispose();
         repaint();
     }
 
-    // 서버에서 받은 /clear (EDT에서 호출)
+    private void paintStroke(Graphics2D g, Stroke s) {
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new Color(s.rgb));
+        g.setStroke(new BasicStroke(s.w, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)); // 끝이 둥글어야 선분 이음새가 매끄럽다
+        g.drawLine(s.x1, s.y1, s.x2, s.y2);
+    }
+
+    // 서버에서 받은 /clear: 전부 지우기 (EDT에서 호출)
     public void clearCanvas() {
+        strokes.clear();
         clearImage();
+        repaint();
+    }
+
+    // 4주차: 서버에서 받은 "/clear 이름": 그 사람이 그린 선분만 지운다 (EDT에서 호출)
+    // 이미지에서는 특정 선만 떼어낼 수 없으므로, 목록에서 빼고 남은 선분을 받은 순서대로 처음부터 다시 그린다
+    // (그 사람이 지우개로 지운 자리도 같이 되돌아온다: 지우개도 그 사람이 그린 흰 선이기 때문)
+    public void clearOwner(String owner) {
+        strokes.removeIf(s -> owner.equals(s.owner));
+        clearImage();
+        Graphics2D g = canvas.createGraphics();
+        for (Stroke s : strokes) paintStroke(g, s);
+        g.dispose();
         repaint();
     }
 
