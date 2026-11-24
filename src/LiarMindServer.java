@@ -472,9 +472,10 @@ public class LiarMindServer extends JFrame {
                             }
                             break;
 
-                        case "/clear": // 그림판 전체 지우기: 대기실에서만 (게임 중에는 남의 그림까지 지워지므로 지우개만)
-                            if (game.canClear()) WriteAll("/clear");
-                            else WriteOne("/system 게임 중에는 전체 지우기를 쓸 수 없습니다. 지우개를 사용하세요.");
+                        case "/clear": // 지우기: 대기실에서는 전체, 게임 중에는 그리는 사람이 자기가 그린 선만
+                            if (game.canClear()) WriteAll("/clear");                          // 대기실: 전체 지우기
+                            else if (game.canDraw(UserName)) WriteAll("/clear " + UserName);  // 게임 중: 그린 사람 선만
+                            else WriteOne("/system 지금은 그림을 지울 수 없습니다.");
                             break;
 
                         case "/ready": // 준비 / 준비 취소 (방장 제외, 대기실에서만)
