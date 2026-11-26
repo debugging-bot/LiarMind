@@ -1,5 +1,6 @@
 // GameRoom.java (게임 진행 상태) - 3주차 새로 작성, 4주차 수정
-//  - 4주차: 준비(레디), 그리는 순서 무작위, 동점이면 동점자끼리 한 번 더 투표
+//  - 4주차: 준비(레디), 그리는 순서 무작위, 동점이면 동점자끼리 다시 투표
+//  - 5주차: 재투표에서 또 동점이면 라이어 승리 대신, 한 명으로 정해질 때까지 계속 다시 투표
 //  - 스레드가 아니라, 여러 UserService 스레드와 타이머 스레드가 함께 쓰는 "공유 객체"다.
 //    그래서 상태를 읽고 바꾸는 public 메소드는 모두 synchronized (한 번에 한 스레드만 들어옴).
 //  - 네트워크를 모른다: 소켓이나 UserService 대신 "이름"으로 사람을 구분하고,
@@ -58,7 +59,7 @@ public class GameRoom {
     private final Map<String, String> votes = new HashMap<>(); // 투표한 사람 -> 지목한 사람
     private final Set<String> ready = new LinkedHashSet<>();   // 준비한 사람 (대기실에서만, 방장 제외)
     private List<String> candidates = null; // 다시 투표할 때의 후보(동점자). null이면 모든 참가자가 후보
-    private boolean revoted = false;        // 이번 투표가 이미 다시 하는 투표인지 (다시 투표는 한 번만)
+    private int revoteCount = 0;            // 이번 투표에서 다시 투표한 횟수 (안내 메시지용)
 
     // 단계가 바뀔 때마다 1씩 늘린다. 타이머가 울렸을 때 번호가 다르면 이미 지난 단계의 타이머라서 무시
     private int phaseToken = 0;
@@ -301,7 +302,7 @@ public class GameRoom {
         phaseToken++;
         votes.clear();
         candidates = null;  // 첫 투표는 모든 참가자가 후보
-        revoted = false;
+        revoteCount = 0;
         box.all("/votestart");
         box.all("/system 라이어라고 생각하는 사람에게 투표하세요. (" + VOTE_SECONDS + "초)");
         box.timerSeconds = VOTE_SECONDS;
@@ -315,8 +316,10 @@ public class GameRoom {
 
     // 표를 세서 가장 많이 받은 사람을 찾는다
     //  - 아무도 투표하지 않음 -> 라이어를 못 찾은 것 (라이어 승리)
-    //  - 동점(첫 투표)        -> 동점자들만 후보로 한 번 더 투표
-    //  - 동점(다시 한 투표)   -> 라이어를 못 찾은 것 (라이어 승리)
+    //  - 동점 -> 한 명으로 정해질 때까지 동점자들만 후보로 다시 투표 (라이어가 동점자 안에 있든 없든)
+    //    동점자들이 서로 변호하고 토론하는 시간을 주기 위해서다.
+    //    끝없이 반복되지는 않는다: 누군가 표를 바꾸거나 투표하지 않으면 동점이 깨지고,
+    //    아무도 투표하지 않으면 위의 "투표 없음"으로 끝난다.
     private void finishVote(Outbox box) {
         Map<String, Integer> count = new LinkedHashMap<>();
         for (String t : votes.values()) count.merge(t, 1, Integer::sum);
@@ -333,23 +336,21 @@ public class GameRoom {
         if (top.isEmpty()) {
             box.all("/system 아무도 투표하지 않아서 라이어를 찾지 못했습니다.");
             endGame(box, "LIAR");
-        } else if (top.size() > 1 && !revoted) {
-            startRevote(box, top);
         } else if (top.size() > 1) {
-            box.all("/system 다시 투표해도 동점입니다. 라이어를 찾지 못했습니다.");
-            endGame(box, "LIAR");
+            startRevote(box, top);
         } else {
             decide(box, top.get(0));
         }
     }
 
-    // 동점자들만 후보로 한 번 더 투표 (30초). 서버가 후보 이름을 /votestart 뒤에 붙여 보낸다
+    // 동점자들만 후보로 다시 투표 (30초). 서버가 후보 이름을 /votestart 뒤에 붙여 보낸다 (다시 동점이면 또 부름)
     private void startRevote(Outbox box, List<String> tied) {
         phaseToken++;       // 첫 투표의 30초 타이머는 무효
         votes.clear();
         candidates = new ArrayList<>(tied);
-        revoted = true;
-        box.all("/system 동점입니다! " + String.join(", ", tied) + " 중에서 다시 투표하세요. (" + VOTE_SECONDS + "초)");
+        revoteCount++;
+        box.all("/system " + (revoteCount == 1 ? "동점입니다! " : "또 동점입니다! (다시 투표 " + revoteCount + "번째) ")
+                + String.join(", ", tied) + " 중에서 다시 투표하세요. (" + VOTE_SECONDS + "초)");
         box.all("/votestart " + String.join(",", tied));
         box.timerSeconds = VOTE_SECONDS;
         box.timerToken = phaseToken;
@@ -383,7 +384,7 @@ public class GameRoom {
         phaseToken++;  // 남아 있는 타이머를 모두 무효로
         votes.clear();
         candidates = null;
-        revoted = false;
+        revoteCount = 0;
         box.gameEnded = true;
     }
 

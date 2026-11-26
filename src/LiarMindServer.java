@@ -10,6 +10,7 @@
 //                       /start, /next, /vote, /guess 처리, 차례인 사람만 그리기, 게임 중 퇴장 처리
 //  - 4주차에 추가한 점: 게임 중 전체 지우기 금지, 준비(/ready), 캐릭터 번호 배정(/avatars),
 //                       그리는 순서 무작위·동점자 다시 투표 (GameRoom)
+//  - 5주차에 추가한 점: 이모티콘(/emo) 중계, 늦게 들어온 사람에게 대기실 낙서 보내기
 
 import java.awt.EventQueue;
 import java.awt.event.ActionEvent;
@@ -47,6 +48,8 @@ public class LiarMindServer extends JFrame {
     public static final int MAX_USERS = 8;          // 프로필 칸이 좌우 4칸씩이므로 최대 8명
     public static final int MAX_NAME_LENGTH = 10;   // 프로필 칸에 들어갈 수 있는 닉네임 길이
     public static final int AVATAR_COUNT = 8;       // 캐릭터 그림 수 (images/avatar/avatar1.png ~ avatar8.png)
+    public static final int EMOJI_COUNT = 6;        // 캐릭터마다 이모티콘 수 (images/emoji/캐릭터번호/1.png ~ 6.png)
+    public static final int MAX_LOBBY_DRAWS = 20000; // 대기실 낙서 기록 최대 선분 수 (너무 많이 쌓여 메모리를 차지하지 않게)
     private final Random random = new Random();
 
     private JPanel contentPane;
@@ -62,6 +65,12 @@ public class LiarMindServer extends JFrame {
     // 게임이 시작되면 true. true이면 새 접속을 거부
     // 바꾸는 곳: /start (UserVec 잠금 안에서 true), 게임이 끝날 때 (false)
     private volatile boolean gameStarted = false;
+
+    // 대기실에서 그린 선분 기록 (5주차). 늦게 들어온 사람에게 그대로 다시 보내서 같은 그림을 보게 한다
+    // 여러 UserService 스레드가 함께 쓰므로 이 목록 자체를 잠금으로 쓴다
+    //  - 대기실 /draw: 기록에 넣은 "다음에" 모두에게 보낸다 (새로 들어온 사람이 기록과 전송 사이에 빠지지 않게)
+    //  - 대기실 /clear, 게임 시작, 게임 끝: 기록을 비운다
+    private final List<String> lobbyDraws = new ArrayList<>();
 
     private final WordBank words = new WordBank("words.txt"); // 제시어 목록 (프로젝트 폴더의 words.txt)
     // 게임 메시지 줄: GameRoom이 넣고, 보내는 스레드(GameSender) 하나가 넣은 순서대로 꺼내 보낸다
@@ -269,6 +278,16 @@ public class LiarMindServer extends JFrame {
     // 잘못된 메시지를 그대로 전달하면 받는 클라이언트들이 숫자 변환 중 오류가 나므로 서버에서 먼저 걸러낸다
     public static final int MAX_STROKE_WIDTH = 50;
 
+    // 이모티콘 번호 검사: 1~EMOJI_COUNT 정수 하나
+    private boolean isValidEmoji(String body) {
+        try {
+            int n = Integer.parseInt(body.trim());
+            return n >= 1 && n <= EMOJI_COUNT;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     private boolean isValidDraw(String body) {
         String[] v = body.trim().split(" ");
         if (v.length != 6) return false;
@@ -279,6 +298,29 @@ public class LiarMindServer extends JFrame {
         }
         int width = Integer.parseInt(v[5]);
         return width >= 1 && width <= MAX_STROKE_WIDTH;
+    }
+
+    // ───── 대기실 낙서 기록 (5주차) ─────
+    private void addLobbyDraw(String draw) {
+        synchronized (lobbyDraws) {
+            if (lobbyDraws.size() < MAX_LOBBY_DRAWS) lobbyDraws.add(draw);
+        }
+    }
+
+    private void clearLobbyDraws() {
+        synchronized (lobbyDraws) {
+            lobbyDraws.clear();
+        }
+    }
+
+    // 새로 들어온 사람에게 지금까지의 대기실 낙서를 보낸다 (목록을 복사한 뒤 잠금 밖에서 전송)
+    private void sendLobbyDraws(UserService user) {
+        List<String> copy;
+        synchronized (lobbyDraws) {
+            copy = new ArrayList<>(lobbyDraws);
+        }
+        for (String d : copy) user.WriteOne("/draw " + d);
+        if (!copy.isEmpty()) AppendText("[" + user.UserName + "] 대기실 낙서 " + copy.size() + "개 전송");
     }
 
     // 이름으로 접속자 찾기 (없으면 null)
@@ -303,7 +345,10 @@ public class LiarMindServer extends JFrame {
                 AppendText("[게임 → " + o.to + "] " + o.msg);
             }
         }
-        if (box.gameEnded) gameStarted = false; // 대기실로 돌아왔으므로 다시 입장 가능
+        if (box.gameEnded) {
+            gameStarted = false;                 // 대기실로 돌아왔으므로 다시 입장 가능
+            clearLobbyDraws();                   // 게임 그림은 대기실 낙서가 아니므로 기록하지 않는다
+        }
         if (box.timerSeconds > 0) {
             final int token = box.timerToken;
             // 정해진 시간 뒤에 타이머 스레드가 run()을 부른다. 그 사이 단계가 바뀌었으면 GameRoom이 무시한다
@@ -411,7 +456,10 @@ public class LiarMindServer extends JFrame {
         private void startGame(String body) {
             synchronized (UserVec) {
                 game.start(UserName, copyNames(), body); // 보낼 메시지는 줄에 들어가고 보내는 스레드가 보낸다
-                if (game.getPhase() != GameRoom.Phase.WAITING) gameStarted = true;
+                if (game.getPhase() != GameRoom.Phase.WAITING) {
+                    gameStarted = true;
+                    clearLobbyDraws(); // 게임을 시작하면 대기실 낙서는 모두의 화면에서 지워진다(/clear)
+                }
             }
         }
 
@@ -435,6 +483,7 @@ public class LiarMindServer extends JFrame {
             WriteOne("/loginok " + UserName);                     // 본인에게 접속 성공 알림
             WriteAll("/system " + UserName + "님이 입장했습니다."); // 모두에게 입장 알림
             sendUserList();                                         // 모두의 프로필 칸 갱신
+            sendLobbyDraws(this);                                   // 5주차: 먼저 그려진 대기실 낙서
             return true;
         }
 
@@ -466,6 +515,7 @@ public class LiarMindServer extends JFrame {
                             // 게임 중에는 지금 그릴 차례인 사람의 것만 전달 (1초에 수십 개라 안내 메시지 없이 무시)
                             if (!game.canDraw(UserName)) break;
                             if (isValidDraw(body)) {
+                                if (game.canClear()) addLobbyDraw(body.trim()); // 대기실 낙서는 기록해 둔다 (5주차)
                                 WriteAll("/draw " + body.trim());
                             } else {
                                 AppendText(UserName + " > 잘못된 /draw 무시: " + body);
@@ -473,9 +523,15 @@ public class LiarMindServer extends JFrame {
                             break;
 
                         case "/clear": // 지우기: 대기실에서는 전체, 게임 중에는 그리는 사람이 자기가 그린 선만
-                            if (game.canClear()) WriteAll("/clear");                          // 대기실: 전체 지우기
+                            if (game.canClear()) { clearLobbyDraws(); WriteAll("/clear"); }  // 대기실: 전체 지우기
                             else if (game.canDraw(UserName)) WriteAll("/clear " + UserName);  // 게임 중: 그린 사람 선만
                             else WriteOne("/system 지금은 그림을 지울 수 없습니다.");
+                            break;
+
+                        case "/emo": // 이모티콘: "/emo 번호" → 모두에게 "/emo 보낸이름 번호" (5주차)
+                            // 번호는 1~EMOJI_COUNT. 그림은 받는 쪽이 /avatars로 아는 보낸 사람의 캐릭터 번호로 고른다
+                            if (isValidEmoji(body)) WriteAll("/emo " + UserName + " " + body.trim());
+                            else WriteOne("/system 이모티콘 번호가 올바르지 않습니다.");
                             break;
 
                         case "/ready": // 준비 / 준비 취소 (방장 제외, 대기실에서만)
